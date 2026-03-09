@@ -10,13 +10,11 @@ single-feature servers across different transports (SSE and StreamableHTTP).
 # pyright: reportUnknownArgumentType=false
 
 import json
-import multiprocessing
-import socket
 from collections.abc import Generator
 
 import pytest
-import uvicorn
 from inline_snapshot import snapshot
+from starlette.applications import Starlette
 
 from examples.snippets.servers import (
     basic_prompt,
@@ -58,7 +56,7 @@ from mcp.types import (
     TextResourceContents,
     ToolListChangedNotification,
 )
-from tests.test_helpers import wait_for_server
+from tests.test_helpers import run_uvicorn_in_thread
 
 
 class NotificationCollector:
@@ -85,23 +83,8 @@ class NotificationCollector:
                 self.tool_notifications.append(message.params)
 
 
-# Common fixtures
-@pytest.fixture
-def server_port() -> int:
-    """Get a free port for testing."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def server_url(server_port: int) -> str:
-    """Get the server URL for testing."""
-    return f"http://127.0.0.1:{server_port}"
-
-
-def run_server_with_transport(module_name: str, port: int, transport: str) -> None:  # pragma: no cover
-    """Run server with specified transport."""
+def make_transport_app(module_name: str, transport: str) -> Starlette:  # pragma: no cover
+    """Create server app for the specified example module and transport."""
     # Get the MCP instance based on module name
     if module_name == "basic_tool":
         mcp = basic_tool.mcp
@@ -128,46 +111,27 @@ def run_server_with_transport(module_name: str, port: int, transport: str) -> No
 
     # Create app based on transport type
     if transport == "sse":
-        app = mcp.sse_app()
+        return mcp.sse_app()
     elif transport == "streamable-http":
-        app = mcp.streamable_http_app()
+        return mcp.streamable_http_app()
     else:
         raise ValueError(f"Invalid transport for test server: {transport}")
 
-    server = uvicorn.Server(config=uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error"))
-    print(f"Starting {transport} server on port {port}")
-    server.run()
-
 
 @pytest.fixture
-def server_transport(request: pytest.FixtureRequest, server_port: int) -> Generator[str, None, None]:
-    """Start server in a separate process with specified MCP instance and transport.
+def server_transport(request: pytest.FixtureRequest) -> Generator[tuple[str, str], None, None]:
+    """Start server in a background thread with specified MCP instance and transport.
 
     Args:
         request: pytest request with param tuple of (module_name, transport)
-        server_port: Port to run the server on
 
     Yields:
-        str: The transport type ('sse' or 'streamable_http')
+        tuple[str, str]: The (transport, url) pair.
     """
     module_name, transport = request.param
 
-    proc = multiprocessing.Process(
-        target=run_server_with_transport,
-        args=(module_name, server_port, transport),
-        daemon=True,
-    )
-    proc.start()
-
-    # Wait for server to be ready
-    wait_for_server(server_port)
-
-    yield transport
-
-    proc.kill()
-    proc.join(timeout=2)
-    if proc.is_alive():  # pragma: no cover
-        print("Server process failed to terminate")
+    with run_uvicorn_in_thread(make_transport_app(module_name, transport)) as url:
+        yield transport, url
 
 
 # Helper function to create client based on transport
@@ -220,9 +184,9 @@ async def elicitation_callback(context: RequestContext[ClientSession], params: E
     ],
     indirect=True,
 )
-async def test_basic_tools(server_transport: str, server_url: str) -> None:
+async def test_basic_tools(server_transport: tuple[str, str]) -> None:
     """Test basic tool functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -256,9 +220,9 @@ async def test_basic_tools(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_basic_resources(server_transport: str, server_url: str) -> None:
+async def test_basic_resources(server_transport: tuple[str, str]) -> None:
     """Test basic resource functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -296,9 +260,9 @@ async def test_basic_resources(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_basic_prompts(server_transport: str, server_url: str) -> None:
+async def test_basic_prompts(server_transport: tuple[str, str]) -> None:
     """Test basic prompt functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -348,9 +312,9 @@ async def test_basic_prompts(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_tool_progress(server_transport: str, server_url: str) -> None:
+async def test_tool_progress(server_transport: tuple[str, str]) -> None:
     """Test tool progress reporting."""
-    transport = server_transport
+    transport, server_url = server_transport
     collector = NotificationCollector()
 
     async def message_handler(message: RequestResponder[ServerRequest, ClientResult] | ServerNotification | Exception):
@@ -404,9 +368,9 @@ async def test_tool_progress(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_sampling(server_transport: str, server_url: str) -> None:
+async def test_sampling(server_transport: tuple[str, str]) -> None:
     """Test sampling (LLM interaction) functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -434,9 +398,9 @@ async def test_sampling(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_elicitation(server_transport: str, server_url: str) -> None:
+async def test_elicitation(server_transport: tuple[str, str]) -> None:
     """Test elicitation (user interaction) functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -483,9 +447,9 @@ async def test_elicitation(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_notifications(server_transport: str, server_url: str) -> None:
+async def test_notifications(server_transport: tuple[str, str]) -> None:
     """Test notifications and logging functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     collector = NotificationCollector()
 
     async def message_handler(message: RequestResponder[ServerRequest, ClientResult] | ServerNotification | Exception):
@@ -530,9 +494,9 @@ async def test_notifications(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_completion(server_transport: str, server_url: str) -> None:
+async def test_completion(server_transport: tuple[str, str]) -> None:
     """Test completion (autocomplete) functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -582,9 +546,9 @@ async def test_completion(server_transport: str, server_url: str) -> None:
     ],
     indirect=True,
 )
-async def test_mcpserver_quickstart(server_transport: str, server_url: str) -> None:
+async def test_mcpserver_quickstart(server_transport: tuple[str, str]) -> None:
     """Test MCPServer quickstart example."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):
@@ -617,9 +581,9 @@ async def test_mcpserver_quickstart(server_transport: str, server_url: str) -> N
     ],
     indirect=True,
 )
-async def test_structured_output(server_transport: str, server_url: str) -> None:
+async def test_structured_output(server_transport: tuple[str, str]) -> None:
     """Test structured output functionality."""
-    transport = server_transport
+    transport, server_url = server_transport
     client_cm = create_client_for_transport(transport, server_url)
 
     async with client_cm as (read_stream, write_stream):

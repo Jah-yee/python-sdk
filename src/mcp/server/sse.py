@@ -181,13 +181,19 @@ class SseServerTransport:
                 In this case we close our side of the streams to signal the client that
                 the connection has been closed.
                 """
-                await EventSourceResponse(content=sse_stream_reader, data_sender_callable=sse_writer)(
-                    scope, receive, send
-                )
-                await read_stream_writer.aclose()
-                await write_stream_reader.aclose()
-                self._read_stream_writers.pop(session_id, None)
-                logging.debug(f"Client session disconnected {session_id}")
+                try:
+                    await EventSourceResponse(content=sse_stream_reader, data_sender_callable=sse_writer)(
+                        scope, receive, send
+                    )
+                finally:
+                    # EventSourceResponse does not close its body iterator on
+                    # normal completion or cancellation (only on SendTimeout),
+                    # so we must close it here to avoid leaking the stream.
+                    await sse_stream_reader.aclose()
+                    await read_stream_writer.aclose()
+                    await write_stream_reader.aclose()
+                    self._read_stream_writers.pop(session_id, None)
+                    logging.debug(f"Client session disconnected {session_id}")
 
             logger.debug("Starting SSE response task")
             tg.start_soon(response_wrapper, scope, receive, send)

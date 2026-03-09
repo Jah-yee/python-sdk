@@ -1,11 +1,8 @@
-import multiprocessing
-import socket
 from collections.abc import AsyncGenerator, Generator
 from urllib.parse import urlparse
 
 import anyio
 import pytest
-import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket
@@ -28,21 +25,9 @@ from mcp.types import (
     TextResourceContents,
     Tool,
 )
-from tests.test_helpers import wait_for_server
+from tests.test_helpers import run_uvicorn_in_thread
 
 SERVER_NAME = "test_server_for_WS"
-
-
-@pytest.fixture
-def server_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def server_url(server_port: int) -> str:
-    return f"ws://127.0.0.1:{server_port}"
 
 
 async def handle_read_resource(  # pragma: no cover
@@ -107,35 +92,14 @@ def make_server_app() -> Starlette:  # pragma: no cover
     return app
 
 
-def run_server(server_port: int) -> None:  # pragma: no cover
-    app = make_server_app()
-    server = uvicorn.Server(config=uvicorn.Config(app=app, host="127.0.0.1", port=server_port, log_level="error"))
-    print(f"starting server on {server_port}")
-    server.run()
+@pytest.fixture()
+def server_url() -> Generator[str, None, None]:
+    with run_uvicorn_in_thread(make_server_app()) as url:
+        yield url.replace("http://", "ws://")
 
 
 @pytest.fixture()
-def server(server_port: int) -> Generator[None, None, None]:
-    proc = multiprocessing.Process(target=run_server, kwargs={"server_port": server_port}, daemon=True)
-    print("starting process")
-    proc.start()
-
-    # Wait for server to be running
-    print("waiting for server to start")
-    wait_for_server(server_port)
-
-    yield
-
-    print("killing server")
-    # Signal the server to stop
-    proc.kill()
-    proc.join(timeout=2)
-    if proc.is_alive():  # pragma: no cover
-        print("server process failed to terminate")
-
-
-@pytest.fixture()
-async def initialized_ws_client_session(server: None, server_url: str) -> AsyncGenerator[ClientSession, None]:
+async def initialized_ws_client_session(server_url: str) -> AsyncGenerator[ClientSession, None]:
     """Create and initialize a WebSocket client session"""
     async with websocket_client(server_url + "/ws") as streams:
         async with ClientSession(*streams) as session:
@@ -153,7 +117,7 @@ async def initialized_ws_client_session(server: None, server_url: str) -> AsyncG
 
 # Tests
 @pytest.mark.anyio
-async def test_ws_client_basic_connection(server: None, server_url: str) -> None:
+async def test_ws_client_basic_connection(server_url: str) -> None:
     """Test the WebSocket connection establishment"""
     async with websocket_client(server_url + "/ws") as streams:
         async with ClientSession(*streams) as session:

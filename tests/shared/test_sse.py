@@ -1,6 +1,4 @@
 import json
-import multiprocessing
-import socket
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -9,7 +7,6 @@ from urllib.parse import urlparse
 import anyio
 import httpx
 import pytest
-import uvicorn
 from httpx_sse import ServerSentEvent
 from inline_snapshot import snapshot
 from starlette.applications import Starlette
@@ -41,21 +38,9 @@ from mcp.types import (
     TextResourceContents,
     Tool,
 )
-from tests.test_helpers import wait_for_server
+from tests.test_helpers import run_uvicorn_in_thread
 
 SERVER_NAME = "test_server_for_SSE"
-
-
-@pytest.fixture
-def server_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def server_url(server_port: int) -> str:
-    return f"http://127.0.0.1:{server_port}"
 
 
 async def _handle_read_resource(  # pragma: no cover
@@ -127,35 +112,15 @@ def make_server_app() -> Starlette:  # pragma: no cover
     return app
 
 
-def run_server(server_port: int) -> None:  # pragma: no cover
-    app = make_server_app()
-    server = uvicorn.Server(config=uvicorn.Config(app=app, host="127.0.0.1", port=server_port, log_level="error"))
-    print(f"starting server on {server_port}")
-    server.run()
+@pytest.fixture()
+def server_url() -> Generator[str, None, None]:
+    """Start the SSE test server in a background thread. Yields its base URL."""
+    with run_uvicorn_in_thread(make_server_app()) as url:
+        yield url
 
 
 @pytest.fixture()
-def server(server_port: int) -> Generator[None, None, None]:
-    proc = multiprocessing.Process(target=run_server, kwargs={"server_port": server_port}, daemon=True)
-    print("starting process")
-    proc.start()
-
-    # Wait for server to be running
-    print("waiting for server to start")
-    wait_for_server(server_port)
-
-    yield
-
-    print("killing server")
-    # Signal the server to stop
-    proc.kill()
-    proc.join(timeout=2)
-    if proc.is_alive():  # pragma: no cover
-        print("server process failed to terminate")
-
-
-@pytest.fixture()
-async def http_client(server: None, server_url: str) -> AsyncGenerator[httpx.AsyncClient, None]:
+async def http_client(server_url: str) -> AsyncGenerator[httpx.AsyncClient, None]:
     """Create test client"""
     async with httpx.AsyncClient(base_url=server_url) as client:
         yield client
@@ -188,7 +153,7 @@ async def test_raw_sse_connection(http_client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.anyio
-async def test_sse_client_basic_connection(server: None, server_url: str) -> None:
+async def test_sse_client_basic_connection(server_url: str) -> None:
     async with sse_client(server_url + "/sse") as streams:
         async with ClientSession(*streams) as session:
             # Test initialization
@@ -202,7 +167,7 @@ async def test_sse_client_basic_connection(server: None, server_url: str) -> Non
 
 
 @pytest.mark.anyio
-async def test_sse_client_on_session_created(server: None, server_url: str) -> None:
+async def test_sse_client_on_session_created(server_url: str) -> None:
     captured: list[str] = []
 
     async with sse_client(server_url + "/sse", on_session_created=captured.append) as streams:
@@ -231,7 +196,7 @@ def test_extract_session_id_from_endpoint(endpoint_url: str, expected: str | Non
 
 @pytest.mark.anyio
 async def test_sse_client_on_session_created_not_called_when_no_session_id(
-    server: None, server_url: str, monkeypatch: pytest.MonkeyPatch
+    server_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     callback_mock = Mock()
 
@@ -250,7 +215,7 @@ async def test_sse_client_on_session_created_not_called_when_no_session_id(
 
 
 @pytest.fixture
-async def initialized_sse_client_session(server: None, server_url: str) -> AsyncGenerator[ClientSession, None]:
+async def initialized_sse_client_session(server_url: str) -> AsyncGenerator[ClientSession, None]:
     async with sse_client(server_url + "/sse", sse_read_timeout=0.5) as streams:
         async with ClientSession(*streams) as session:
             await session.initialize()
@@ -297,37 +262,17 @@ async def test_sse_client_timeout(  # pragma: no cover
     pytest.fail("the client should have timed out and returned an error already")
 
 
-def run_mounted_server(server_port: int) -> None:  # pragma: no cover
-    app = make_server_app()
-    main_app = Starlette(routes=[Mount("/mounted_app", app=app)])
-    server = uvicorn.Server(config=uvicorn.Config(app=main_app, host="127.0.0.1", port=server_port, log_level="error"))
-    print(f"starting server on {server_port}")
-    server.run()
-
-
 @pytest.fixture()
-def mounted_server(server_port: int) -> Generator[None, None, None]:
-    proc = multiprocessing.Process(target=run_mounted_server, kwargs={"server_port": server_port}, daemon=True)
-    print("starting process")
-    proc.start()
-
-    # Wait for server to be running
-    print("waiting for server to start")
-    wait_for_server(server_port)
-
-    yield
-
-    print("killing server")
-    # Signal the server to stop
-    proc.kill()
-    proc.join(timeout=2)
-    if proc.is_alive():  # pragma: no cover
-        print("server process failed to terminate")
+def mounted_server_url() -> Generator[str, None, None]:
+    """Start a server with the SSE app mounted under /mounted_app. Yields its base URL."""
+    app = Starlette(routes=[Mount("/mounted_app", app=make_server_app())])
+    with run_uvicorn_in_thread(app) as url:
+        yield url
 
 
 @pytest.mark.anyio
-async def test_sse_client_basic_connection_mounted_app(mounted_server: None, server_url: str) -> None:
-    async with sse_client(server_url + "/mounted_app/sse") as streams:
+async def test_sse_client_basic_connection_mounted_app(mounted_server_url: str) -> None:
+    async with sse_client(mounted_server_url + "/mounted_app/sse") as streams:
         async with ClientSession(*streams) as session:
             # Test initialization
             result = await session.initialize()
@@ -381,9 +326,8 @@ async def _handle_context_list_tools(  # pragma: no cover
     )
 
 
-def run_context_server(server_port: int) -> None:  # pragma: no cover
-    """Run a server that captures request context"""
-    # Configure security with allowed hosts/origins for testing
+def make_context_server_app() -> Starlette:  # pragma: no cover
+    """Build a server app that captures and echoes request context via tools."""
     security_settings = TransportSecuritySettings(
         allowed_hosts=["127.0.0.1:*", "localhost:*"], allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
     )
@@ -399,40 +343,23 @@ def run_context_server(server_port: int) -> None:  # pragma: no cover
             await context_server.run(streams[0], streams[1], context_server.create_initialization_options())
         return Response()
 
-    app = Starlette(
+    return Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ]
     )
 
-    server = uvicorn.Server(config=uvicorn.Config(app=app, host="127.0.0.1", port=server_port, log_level="error"))
-    print(f"starting context server on {server_port}")
-    server.run()
-
 
 @pytest.fixture()
-def context_server(server_port: int) -> Generator[None, None, None]:
-    """Fixture that provides a server with request context capture"""
-    proc = multiprocessing.Process(target=run_context_server, kwargs={"server_port": server_port}, daemon=True)
-    print("starting context server process")
-    proc.start()
-
-    # Wait for server to be running
-    print("waiting for context server to start")
-    wait_for_server(server_port)
-
-    yield
-
-    print("killing context server")
-    proc.kill()
-    proc.join(timeout=2)
-    if proc.is_alive():  # pragma: no cover
-        print("context server process failed to terminate")
+def context_server_url() -> Generator[str, None, None]:
+    """Start a server with request-context capture in a background thread. Yields its base URL."""
+    with run_uvicorn_in_thread(make_context_server_app()) as url:
+        yield url
 
 
 @pytest.mark.anyio
-async def test_request_context_propagation(context_server: None, server_url: str) -> None:
+async def test_request_context_propagation(context_server_url: str) -> None:
     """Test that request context is properly propagated through SSE transport."""
     # Test with custom headers
     custom_headers = {
@@ -441,7 +368,7 @@ async def test_request_context_propagation(context_server: None, server_url: str
         "X-Trace-Id": "trace-123",
     }
 
-    async with sse_client(server_url + "/sse", headers=custom_headers) as (
+    async with sse_client(context_server_url + "/sse", headers=custom_headers) as (
         read_stream,
         write_stream,
     ):
@@ -465,7 +392,7 @@ async def test_request_context_propagation(context_server: None, server_url: str
 
 
 @pytest.mark.anyio
-async def test_request_context_isolation(context_server: None, server_url: str) -> None:
+async def test_request_context_isolation(context_server_url: str) -> None:
     """Test that request contexts are isolated between different SSE clients."""
     contexts: list[dict[str, Any]] = []
 
@@ -473,7 +400,7 @@ async def test_request_context_isolation(context_server: None, server_url: str) 
     for i in range(3):
         headers = {"X-Request-Id": f"request-{i}", "X-Custom-Value": f"value-{i}"}
 
-        async with sse_client(server_url + "/sse", headers=headers) as (
+        async with sse_client(context_server_url + "/sse", headers=headers) as (
             read_stream,
             write_stream,
         ):
@@ -611,7 +538,7 @@ async def test_sse_client_handles_empty_keepalive_pings() -> None:
 
 
 @pytest.mark.anyio
-async def test_sse_session_cleanup_on_disconnect(server: None, server_url: str) -> None:
+async def test_sse_session_cleanup_on_disconnect(server_url: str) -> None:
     """Regression test for https://github.com/modelcontextprotocol/python-sdk/issues/1227
 
     When a client disconnects, the server should remove the session from
