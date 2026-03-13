@@ -1,6 +1,6 @@
 """Tests for OAuth 2.0 shared code."""
 
-from mcp.shared.auth import OAuthMetadata
+from mcp.shared.auth import OAuthClientMetadata, OAuthMetadata, InvalidScopeError
 
 
 def test_oauth():
@@ -58,3 +58,37 @@ def test_oauth_with_jarm():
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
         }
     )
+
+
+def test_validate_scope_none_registered_allows_any():
+    """None registered scope should mean no restrictions - allow any scope."""
+    metadata = OAuthClientMetadata(redirect_uris=["https://example.com/callback"], scope=None)
+    result = metadata.validate_scope("read write")
+    assert result == ["read", "write"]
+
+
+def test_validate_scope_matching():
+    """Should return requested scopes when they match registered scopes."""
+    metadata = OAuthClientMetadata(redirect_uris=["https://example.com/callback"], scope="read write")
+    result = metadata.validate_scope("read")
+    assert result == ["read"]
+
+
+def test_validate_scope_rejects_unregistered():
+    """Should reject scopes not in registered scopes."""
+    metadata = OAuthClientMetadata(redirect_uris=["https://example.com/callback"], scope="read")
+    try:
+        metadata.validate_scope("write")
+        assert False, "Expected InvalidScopeError"
+    except InvalidScopeError:
+        pass
+
+
+def test_validate_scope_empty_registered_rejects_all():
+    """Empty string registered scope should reject all requested scopes."""
+    metadata = OAuthClientMetadata(redirect_uris=["https://example.com/callback"], scope="")
+    try:
+        metadata.validate_scope("read")
+        assert False, "Expected InvalidScopeError"
+    except InvalidScopeError:
+        pass
