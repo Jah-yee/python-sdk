@@ -16,11 +16,23 @@ from typing_extensions import deprecated
 logger = logging.getLogger("client.stdio.win32")
 
 # Windows-specific imports for Job Objects
+# Try to import pywin32, but allow it to fail gracefully on Windows systems
+# where pywin32 installation fails (e.g., due to AV software locking DLLs)
 if sys.platform == "win32":
-    import pywintypes
-    import win32api
-    import win32con
-    import win32job
+    try:
+        import pywintypes
+        import win32api
+        import win32con
+        import win32job
+    except ImportError:
+        # pywin32 installation may fail on some Windows systems due to AV issues
+        # The null-checks in _create_job_object() and _maybe_assign_process_to_job()
+        # handle this gracefully
+        logger.warning("Failed to import pywin32. Windows process tree cleanup will be limited.")
+        pywintypes = None
+        win32api = None
+        win32con = None
+        win32job = None
 else:
     # Type stubs for non-Windows platforms
     win32api = None
