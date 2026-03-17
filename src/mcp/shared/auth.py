@@ -71,7 +71,10 @@ class OAuthClientMetadata(BaseModel):
         if requested_scope is None:
             return None
         requested_scopes = requested_scope.split(" ")
-        allowed_scopes = [] if self.scope is None else self.scope.split(" ")
+        # If client has no scope restrictions (self.scope is None), allow any requested scope
+        if self.scope is None:
+            return requested_scopes
+        allowed_scopes = self.scope.split(" ")
         for scope in requested_scopes:
             if scope not in allowed_scopes:  # pragma: no branch
                 raise InvalidScopeError(f"Client was not registered with scope {scope}")
