@@ -118,12 +118,14 @@ class ClientSession(
         logging_callback: LoggingFnT | None = None,
         message_handler: MessageHandlerFnT | None = None,
         client_info: types.Implementation | None = None,
+        protocol_version: str | None = None,
         *,
         sampling_capabilities: types.SamplingCapability | None = None,
         experimental_task_handlers: ExperimentalTaskHandlers | None = None,
     ) -> None:
         super().__init__(read_stream, write_stream, read_timeout_seconds=read_timeout_seconds)
         self._client_info = client_info or DEFAULT_CLIENT_INFO
+        self._protocol_version = protocol_version or types.LATEST_PROTOCOL_VERSION
         self._sampling_callback = sampling_callback or _default_sampling_callback
         self._sampling_capabilities = sampling_capabilities
         self._elicitation_callback = elicitation_callback or _default_elicitation_callback
@@ -131,7 +133,7 @@ class ClientSession(
         self._logging_callback = logging_callback or _default_logging_callback
         self._message_handler = message_handler or _default_message_handler
         self._tool_output_schemas: dict[str, dict[str, Any] | None] = {}
-        self._server_capabilities: types.ServerCapabilities | None = None
+        self._initialize_result: types.InitializeResult | None = None
         self._experimental_features: ExperimentalClientFeatures | None = None
 
         # Experimental: Task handlers (use defaults if not provided)
@@ -168,7 +170,7 @@ class ClientSession(
         result = await self.send_request(
             types.InitializeRequest(
                 params=types.InitializeRequestParams(
-                    protocol_version=types.LATEST_PROTOCOL_VERSION,
+                    protocol_version=self._protocol_version,
                     capabilities=types.ClientCapabilities(
                         sampling=sampling,
                         elicitation=elicitation,
@@ -185,18 +187,19 @@ class ClientSession(
         if result.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
             raise RuntimeError(f"Unsupported protocol version from the server: {result.protocol_version}")
 
-        self._server_capabilities = result.capabilities
+        self._initialize_result = result
 
         await self.send_notification(types.InitializedNotification())
 
         return result
 
-    def get_server_capabilities(self) -> types.ServerCapabilities | None:
-        """Return the server capabilities received during initialization.
+    @property
+    def initialize_result(self) -> types.InitializeResult | None:
+        """The server's InitializeResult. None until initialize() has been called.
 
-        Returns None if the session has not been initialized yet.
+        Contains server_info, capabilities, instructions, and the negotiated protocol_version.
         """
-        return self._server_capabilities
+        return self._initialize_result
 
     @property
     def experimental(self) -> ExperimentalClientFeatures:
