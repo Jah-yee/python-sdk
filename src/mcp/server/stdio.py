@@ -17,6 +17,7 @@ Example:
     ```
 """
 
+import selectors
 import sys
 from contextlib import asynccontextmanager
 from io import TextIOWrapper
@@ -55,15 +56,25 @@ async def stdio_server(stdin: anyio.AsyncFile[str] | None = None, stdout: anyio.
     async def stdin_reader():
         try:
             async with read_stream_writer:
-                async for line in stdin:
-                    try:
-                        message = types.jsonrpc_message_adapter.validate_json(line, by_name=False)
-                    except Exception as exc:
-                        await read_stream_writer.send(exc)
-                        continue
+                selector = selectors.DefaultSelector()
+                selector.register(stdin, selectors.EVENT_READ)
 
-                    session_message = SessionMessage(message)
-                    await read_stream_writer.send(session_message)
+                while True:
+                    # Use selector to detect when stdin is readable
+                    events = await anyio.wait_readable(stdin, timeout=1.0)
+                    if events:
+                        line = await stdin.read()
+                        # Empty line means EOF
+                        if not line:
+                            break
+                        try:
+                            message = types.jsonrpc_message_adapter.validate_json(line, by_name=False)
+                        except Exception as exc:
+                            await read_stream_writer.send(exc)
+                            continue
+
+                        session_message = SessionMessage(message)
+                        await read_stream_writer.send(session_message)
         except anyio.ClosedResourceError:  # pragma: no cover
             await anyio.lowlevel.checkpoint()
 
